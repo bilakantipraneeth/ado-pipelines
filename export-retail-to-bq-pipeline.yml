@@ -1,0 +1,35 @@
+# Azure DevOps Pipeline to export both Products and User Events from Google Cloud Retail
+# This pipeline is driven by a runtime parameter to select the target environment.
+
+trigger:
+  - main
+
+pool:
+  vmImage: "ubuntu-latest"
+
+parameters:
+  - name: environment
+    displayName: Environment
+    type: string
+    default: dev
+    values:
+      - dev
+      - prod
+
+# Dynamically load variables based on the selected environment parameter
+variables:
+  - template: variables/${{ parameters.environment }}.yml
+
+stages:
+  - stage: Development
+    displayName: "Development Environment"
+    condition: and(succeeded(), eq('${{ parameters.environment }}', 'dev'))
+    jobs:
+      - template: templates/export-job.yml # Reusable job template
+
+  - stage: Production
+    displayName: "Production Environment"
+    condition: and(succeeded(), eq('${{ parameters.environment }}', 'prod'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - template: templates/export-job.yml # Reusable job template
+

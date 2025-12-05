@@ -1,0 +1,10 @@
+# variables/prod.yml
+# Variables for the Production environment
+
+variables:
+  gcpServiceAccountKeyFile: "ado-bq-exporter-key-prod.json"
+  gcpProjectId: "pkrb12-prod"
+  bqDataset: "retail_data_prod"
+  productBranchId: "default_branch" # This could be a different branch for prod
+  productTableIdPrefix: "products_export_view"
+  userEventTableIdPrefix: "user_events_export_view"
