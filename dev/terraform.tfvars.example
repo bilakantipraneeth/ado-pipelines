@@ -1,0 +1,9 @@
+# This is an example file. Copy this to a new file named 'terraform.tfvars'
+# and replace the placeholder values with your actual credentials.
+# DO NOT commit the terraform.tfvars file to version control.
+
+# gcp_project_id = "your-actual-gcp-project-id"
+
+# aws_access_key_id     = "YOUR_REAL_AWS_ACCESS_KEY"
+# aws_secret_access_key = "YOUR_REAL_AWS_SECRET_KEY"
+# aws_session_token     = "YOUR_REAL_AWS_SESSION_TOKEN" # Optional
