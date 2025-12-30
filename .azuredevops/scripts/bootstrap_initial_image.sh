@@ -1,150 +1,145 @@
 #!/bin/bash
-#
-# bootstrap_initial_image.sh
+# Mirror images from AWS ECR to GCP Artifact Registry
+# Usage: ./bootstrap_initial_image.sh <artifact-id>
 
 set -euo pipefail
 
-# --- Constants ---
-# These specific values are required by the LiveRamp integration docs.
-ECR_REGISTRY="461694764112.dkr.ecr.eu-central-1.amazonaws.com"
+# --- Configuration ---
+ECR_REGISTRY_ID="461694764112"
 ECR_REGION="eu-central-1"
+ECR_URL="${ECR_REGISTRY_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com"
 IMAGE_NAME="vault-app"
 IMAGE_TAG="latest"
 
-# --- Helper Functions ---
+# Logging helper
+log() { echo "[$(date +'%Y-%m-%dT%H:%M:%S')] $*"; }
 
-log() {
-    echo "[$(date +'%Y-%m-%dT%H:%M:%S%z')] $*"
+# Robust command check
+has_cmd() { 
+    command -v "$1" &> /dev/null || command -v "$1.exe" &> /dev/null; 
 }
 
-run_as_root() {
-    if [ "$EUID" -eq 0 ]; then
-        "$@"
-    else
-        if command -v sudo &> /dev/null; then
-            sudo "$@"
-        else
-            log "Error: Action requires root privileges, but 'sudo' is not installed."
-            exit 1
-        fi
-    fi
-}
-
-ensure_prerequisites() {
-    local missing=0
-    for cmd in curl unzip; do
-        if ! command -v "$cmd" &> /dev/null; then
-            log "Error: Prerequisite '$cmd' is not installed."
-            missing=1
+# 1. Dependency Management
+ensure_dependencies() {
+    local primary_tools=("aws" "docker" "gcloud")
+    for tool in "${primary_tools[@]}"; do
+        if ! has_cmd "${tool}"; then
+            log "Tool '${tool}' missing. Attempting recovery..."
+            if ! has_cmd "curl" || ! has_cmd "unzip"; then
+                log "Fatal: 'curl' and 'unzip' required for auto-install."
+                exit 1
+            fi
+            case "${tool}" in
+                "aws")
+                    curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+                    unzip -q awscliv2.zip && sudo ./aws/install --update
+                    rm -rf aws awscliv2.zip ;;
+                "gcloud")
+                    curl -s https://sdk.cloud.google.com | bash -s -- --disable-prompts > /dev/null 2>&1
+                    export PATH=$PATH:$HOME/google-cloud-sdk/bin ;;
+                "docker")
+                    curl -fsSL https://get.docker.com -o get-docker.sh
+                    sudo sh get-docker.sh > /dev/null 2>&1
+                    sudo systemctl start docker || true
+                    rm get-docker.sh ;;
+            esac
+            log "'${tool}' installed."
         fi
     done
+}
 
-    if [ "$missing" -eq 1 ]; then
-        log "Critical: Missing basic prerequisites (curl, unzip). Cannot proceed with auto-installation."
+# 2. AWS Configuration
+configure_aws() {
+    local ak=$1
+    local sk=$2
+    log "Setting up AWS configuration files..."
+    
+    # Unset env vars so the CLI uses the config files
+    unset AWS_ACCESS_KEY_ID
+    unset AWS_SECRET_ACCESS_KEY
+    unset AWS_SESSION_TOKEN
+    unset AWS_SECURITY_TOKEN
+
+    aws configure set aws_access_key_id "$ak"
+    aws configure set aws_secret_access_key "$sk"
+    aws configure set region "$ECR_REGION"
+    aws configure set output json
+}
+
+# 3. Registry Authentication
+authenticate_registries() {
+    local gcp_host=$1
+    log "Authenticating with Google Cloud..."
+    gcloud auth configure-docker "${gcp_host}" --quiet > /dev/null 2>&1
+
+    log "Authenticating with AWS ECR..."
+    local pass
+    if ! pass=$(aws ecr get-login-password --region "${ECR_REGION}" 2>&1); then
+        log "Fatal: AWS Auth failed. Error: $pass"
         exit 1
     fi
-}
 
-install_aws_cli() {
-    log "Installing AWS CLI v2..."
-    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" > /dev/null 2>&1
-    unzip -q awscliv2.zip
-    run_as_root ./aws/install
-    rm -rf aws awscliv2.zip
-    log "AWS CLI installed successfully."
-}
-
-install_docker() {
-    log "Installing Docker..."
-    curl -fsSL https://get.docker.com -o get-docker.sh > /dev/null 2>&1
-    run_as_root sh get-docker.sh
-    log "Docker installed successfully."
-}
-
-ensure_dependencies() {
-    log "Checking dependencies..."
-
-    if ! command -v aws &> /dev/null; then
-        log "AWS CLI not found. Attempting installation..."
-        install_aws_cli
-    else
-        log "AWS CLI is present."
-    fi
-
-    if ! command -v docker &> /dev/null; then
-        log "Docker not found. Attempting installation..."
-        install_docker
-    else
-        log "Docker is present."
-    fi
-
-    if ! command -v gcloud &> /dev/null; then
-        log "Error: 'gcloud' is not installed. Please install the Google Cloud SDK."
-
+    if ! echo "$pass" | docker login --username AWS --password-stdin "${ECR_URL}" &> /dev/null; then
+        log "Fatal: Docker login to AWS failed."
         exit 1
     fi
+    log "Authentication successful."
 }
 
-usage() {
-    echo "Usage: $0 <artifact-id>"
-    echo "  <artifact-id>: The full GCP Artifact Registry path (e.g., projects/P/locations/L/repositories/R)"
-    exit 1
+# 4. Image Mirroring
+mirror_image() {
+    local gcp_target=$1
+    log "Mirroring: [AWS] -> [GCP]"
+    docker pull "${ECR_URL}/${IMAGE_NAME}:${IMAGE_TAG}" > /dev/null
+    docker tag "${ECR_URL}/${IMAGE_NAME}:${IMAGE_TAG}" "${gcp_target}"
+    docker push "${gcp_target}" > /dev/null
 }
 
-# --- Main Logic ---
+# 5. Cleanup Function
+cleanup() {
+    log "Executing cleanup sequence..."
+    
+    # Remove mirrored Docker images to save space
+    if has_cmd "docker"; then
+        log "Purging temporary images..."
+        docker rmi "${ECR_URL}/${IMAGE_NAME}:${IMAGE_TAG}" 2>/dev/null || true
+    fi
+
+    # Wipe transient AWS credentials
+    if [ -d "$HOME/.aws" ]; then
+        log "Clearing transient AWS credentials..."
+        rm -rf "$HOME/.aws/credentials" "$HOME/.aws/config" 2>/dev/null || true
+    fi
+    
+    log "Cleanup complete."
+}
 
 main() {
-    # 1. Preparation
-    ensure_prerequisites
+    local artifact_id="${1:-}"
+    [[ -z "${artifact_id}" ]] && { echo "Usage: $0 <artifact-path>"; exit 1; }
+
+    # Set trap for cleanup on exit (success or failure)
+    trap cleanup EXIT
+
+    # Extract Metadata
+    local gcp_project=$(echo "${artifact_id}" | cut -d'/' -f2)
+    local gcp_location=$(echo "${artifact_id}" | cut -d'/' -f4)
+    local gcp_repo=$(echo "${artifact_id}" | cut -d'/' -f6)
+    local gcp_host="${gcp_location}-docker.pkg.dev"
+    local gcp_target="${gcp_host}/${gcp_project}/${gcp_repo}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+    # Sanitization
+    local ak=$(echo "${AWS_ACCESS_KEY_ID:-}" | tr -d '[:space:]')
+    local sk=$(echo "${AWS_SECRET_ACCESS_KEY:-}" | tr -d '[:space:]')
+    [[ -z "${ak}" || -z "${sk}" ]] && { log "Fatal: AWS credentials missing."; exit 1; }
+
+    # Pipeline Sequence
     ensure_dependencies
+    configure_aws "$ak" "$sk"
+    authenticate_registries "$gcp_host"
+    mirror_image "$gcp_target"
 
-    # 2. Argument Parsing
-    if [ "$#" -ne 1 ]; then
-        usage
-    fi
-    local artifact_id="$1"
-
-    if [ -z "$artifact_id" ]; then
-        log "Error: Artifact ID is empty."
-        usage
-    fi
-
-
-
-    local project_id
-    project_id=$(echo "$artifact_id" | cut -d'/' -f2)
-    local location
-    location=$(echo "$artifact_id" | cut -d'/' -f4)
-    local repo_id
-    repo_id=$(echo "$artifact_id" | cut -d'/' -f6)
-
-    # Construct GCP Artifact Registry URL
-    local gcp_repo_url="$location-docker.pkg.dev/$project_id/$repo_id"
-    local gcp_repo_host
-    gcp_repo_host=$(echo "$gcp_repo_url" | cut -d'/' -f1)
-
-
-    log "Authenticating to GCP Artifact Registry: $gcp_repo_host..."
-    gcloud auth configure-docker "$gcp_repo_host" --quiet
-
-    log "Authenticating to AWS ECR..."
-    aws ecr get-login-password --region "$ECR_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
-
-
-    local source_image="$ECR_REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
-    local target_image="$gcp_repo_url/$IMAGE_NAME:$IMAGE_TAG"
-
-    log "Pulling image: $source_image..."
-    docker pull "$source_image"
-
-    log "Tagging image: $target_image..."
-    docker tag "$source_image" "$target_image"
-
-    log "Pushing image to GCP..."
-    docker push "$target_image"
-
-    log "Operation completed successfully."
+    log "Bootstrap sequence complete."
 }
 
-# Run Main
 main "$@"

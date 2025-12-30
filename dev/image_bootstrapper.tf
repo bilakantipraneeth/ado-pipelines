@@ -10,13 +10,12 @@ resource "null_resource" "initial_image_bootstrapper" {
 
   provisioner "local-exec" {
     working_dir = "${path.root}/../.azuredevops/scripts"
-    command     = "./bootstrap_initial_image.sh ${self.triggers.repository_id}"
+    command     = "bash ./bootstrap_initial_image.sh ${self.triggers.repository_id}"
     interpreter = ["bash", "-c"]
 
     environment = {
-      AWS_ACCESS_KEY_ID     = data.google_secret_manager_secret_version.lr_access_key.secret_data
-      AWS_SECRET_ACCESS_KEY = data.google_secret_manager_secret_version.lr_secret_key.secret_data
-      AWS_ACCOUNT_ID        = data.google_secret_manager_secret_version.lr_account_id.secret_data
+      AWS_ACCESS_KEY_ID     = trimspace(data.google_secret_manager_secret_version.lr_access_key.secret_data)
+      AWS_SECRET_ACCESS_KEY = trimspace(data.google_secret_manager_secret_version.lr_secret_key.secret_data)
     }
   }
 }
