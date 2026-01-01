@@ -240,20 +240,43 @@ main() {
     [[ -z "${artifact_id}" ]] && { echo "Usage: $0 <artifact-path>"; exit 1; }
     trap cleanup EXIT
 
-    local gcp_project=$(echo "${artifact_id}" | cut -d'/' -f2)
-    local gcp_location=$(echo "${artifact_id}" | cut -d'/' -f4)
-    local gcp_repo=$(echo "${artifact_id}" | cut -d'/' -f6)
-    local gcp_host="${gcp_location}-docker.pkg.dev"
-    local gcp_target="${gcp_host}/${gcp_project}/${gcp_repo}/${IMAGE_NAME}:${IMAGE_TAG}"
+    local gcp_host=""
+    local gcp_target=""
+
+    # Detect input format
+    if [[ "${artifact_id}" == projects/* ]]; then
+        # Format: projects/{project}/locations/{location}/repositories/{repo}
+        local gcp_project=$(echo "${artifact_id}" | cut -d'/' -f2)
+        local gcp_location=$(echo "${artifact_id}" | cut -d'/' -f4)
+        local gcp_repo=$(echo "${artifact_id}" | cut -d'/' -f6)
+        gcp_host="${gcp_location}-docker.pkg.dev"
+        gcp_target="${gcp_host}/${gcp_project}/${gcp_repo}/${IMAGE_NAME}:${IMAGE_TAG}"
+    else
+        # Format: {region}-docker.pkg.dev/{project}/{repo}
+        gcp_host=$(echo "${artifact_id}" | cut -d'/' -f1)
+        gcp_target="${artifact_id}/${IMAGE_NAME}:${IMAGE_TAG}"
+    fi
+
+    log "Target GCP Host: $gcp_host"
+    log "Target Image Path: $gcp_target"
 
     local ak=$(echo "${AWS_ACCESS_KEY_ID:-}" | tr -d '[:space:]')
     local sk=$(echo "${AWS_SECRET_ACCESS_KEY:-}" | tr -d '[:space:]')
     [[ -z "${ak}" || -z "${sk}" ]] && { log "Fatal: AWS credentials missing."; exit 1; }
 
     ensure_dependencies
+    
+    # Configure Auth BEFORE testing
+    log "Configuring GCP Docker Auth..."
+    gcloud auth configure-docker "${gcp_host}" --quiet > /dev/null 2>&1
+
+    # --- TEMP TEST BLOCK ---
     test_docker_flow "$gcp_target"
+    # --- END TEMP TEST BLOCK ---
+
     configure_aws "$ak" "$sk"
-    authenticate_registries "$gcp_host"
+    # authenticate_registries is now partly redundant for GCP, but keeps AWS login logic
+    authenticate_registries "$gcp_host" 
     mirror_image "$gcp_target"
 
     log "Operation complete."
